@@ -6,6 +6,7 @@ const {
   verifyEmail,
   getMe,
   setPIN,
+  verifyPIN
   verifyPIN,
   forgotPassword,
   resetPassword

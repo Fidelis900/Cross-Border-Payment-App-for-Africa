@@ -207,6 +207,7 @@ async function verifyPIN(req, res, next) {
   }
 }
 
+module.exports = { register, login, verifyEmail, getMe, setPIN, verifyPIN };
 async function forgotPassword(req, res, next) {
   try {
     const email = req.body.email;

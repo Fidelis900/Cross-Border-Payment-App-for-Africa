@@ -29,7 +29,8 @@ CREATE TABLE transactions (
   recipient_wallet VARCHAR(56) NOT NULL,
   amount           DECIMAL(20, 7) NOT NULL,
   asset            VARCHAR(12) DEFAULT 'XLM',
-  memo             VARCHAR(28),
+  memo             VARCHAR(128),
+  memo_type        VARCHAR(10),
   tx_hash          VARCHAR(64) UNIQUE,
   status           VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','completed','failed')),
   created_at       TIMESTAMPTZ DEFAULT NOW()
