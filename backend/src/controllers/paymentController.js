@@ -9,6 +9,9 @@ const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 // Approximate XLM/USD rate — in production replace with a live price feed
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 
+// Daily send limit per user
+const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "10000");
+
 function estimateUSDValue(amount, asset) {
   if (asset === "USD" || asset === "USDC") return parseFloat(amount);
   if (asset === "XLM") return parseFloat(amount) * XLM_USD_RATE;
@@ -23,6 +26,29 @@ async function fraudCheck(walletAddress) {
     [walletAddress],
   );
   return parseInt(result.rows[0].count) >= 5;
+}
+
+// Check daily send limit for user
+async function checkDailyLimit(walletAddress, currentAmount, asset) {
+  const result = await db.query(
+    `SELECT COALESCE(SUM(amount), 0) as total_sent
+     FROM transactions
+     WHERE sender_wallet = $1 
+       AND asset = $2
+       AND status = 'completed'
+       AND created_at > NOW() - INTERVAL '24 hours'`,
+    [walletAddress, asset],
+  );
+  
+  const totalSent = parseFloat(result.rows[0].total_sent);
+  const newTotal = totalSent + parseFloat(currentAmount);
+  
+  return {
+    exceeded: newTotal > DAILY_SEND_LIMIT,
+    totalSent,
+    limit: DAILY_SEND_LIMIT,
+    remaining: Math.max(0, DAILY_SEND_LIMIT - totalSent)
+  };
 }
 
 async function send(req, res, next) {
@@ -69,6 +95,21 @@ async function send(req, res, next) {
       return res
         .status(429)
         .json({ error: "Transaction limit reached. Please wait before sending again." });
+    }
+
+    // Daily send limit check
+    const dailyLimit = await checkDailyLimit(public_key, amount, asset);
+    if (dailyLimit.exceeded) {
+      return res.status(400).json({
+        error: `Daily send limit exceeded. You have sent ${dailyLimit.totalSent} ${asset} in the last 24 hours. Limit: ${dailyLimit.limit} ${asset}`,
+        code: 'DAILY_LIMIT_EXCEEDED',
+        details: {
+          totalSent: dailyLimit.totalSent,
+          limit: dailyLimit.limit,
+          remaining: dailyLimit.remaining,
+          asset
+        }
+      });
     }
 
     // Broadcast to Stellar

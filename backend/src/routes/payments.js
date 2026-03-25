@@ -11,6 +11,10 @@ const validate = (req, res, next) => {
   next();
 };
 
+// Stellar minimum payment is 0.0000001 XLM (1 stroop)
+const STELLAR_MIN_AMOUNT = 0.0000001;
+const MAX_TRANSACTION_AMOUNT = parseFloat(process.env.MAX_TRANSACTION_AMOUNT || '1000000');
+
 router.use(authMiddleware);
 
 router.post('/send',
@@ -23,7 +27,18 @@ router.post('/send',
         }
         return true;
       }),
-    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
+    body('amount')
+      .isFloat({ gt: 0 }).withMessage('Amount must be greater than 0')
+      .custom((value) => {
+        const amount = parseFloat(value);
+        if (amount < STELLAR_MIN_AMOUNT) {
+          throw new Error(`Amount must be at least ${STELLAR_MIN_AMOUNT} XLM (1 stroop)`);
+        }
+        if (amount > MAX_TRANSACTION_AMOUNT) {
+          throw new Error(`Amount exceeds maximum transaction limit of ${MAX_TRANSACTION_AMOUNT}`);
+        }
+        return true;
+      }),
     body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
   ],
   validate,
