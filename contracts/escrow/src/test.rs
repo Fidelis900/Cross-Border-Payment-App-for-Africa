@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, MockAuth, MockAuthInvoke},
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger, MockAuth, MockAuthInvoke},
     token::{Client as TokenClient, StellarAssetClient},
     Address, Env, IntoVal,
 };
@@ -253,4 +253,41 @@ fn test_withdraw_fees_wrong_caller() {
 fn test_get_nonexistent_escrow() {
     let (_, client, _, _) = setup();
     client.get_escrow(&999);
+}
+
+#[test]
+fn test_deposit_into_active_escrow() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 500_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount * 2);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+    client.deposit(&sender, &escrow_id, &amount);
+
+    assert_eq!(client.get_escrow(&escrow_id).amount, amount * 2);
+}
+
+#[test]
+#[should_panic(expected = "Escrow has expired")]
+fn test_deposit_into_expired_escrow_is_rejected() {
+    let (env, client, admin, usdc_id) = setup();
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let agent = Address::generate(&env);
+    let amount = 500_0000000i128;
+
+    mint_usdc(&env, &usdc_id, &admin, &sender, amount * 2);
+
+    let escrow_id = client.create_escrow(&sender, &recipient, &agent, &amount, &250);
+
+    // Advance ledger past the 30-day expiry window
+    env.ledger().with_mut(|li| {
+        li.timestamp += 30 * 24 * 60 * 60 + 1;
+    });
+
+    client.deposit(&sender, &escrow_id, &amount);
 }
