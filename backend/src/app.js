@@ -14,6 +14,7 @@ const adminRoutes = require('./routes/admin');
 const webhookRoutes = require('./routes/webhooks');
 const notificationRoutes = require('./routes/notifications');
 const sep10Routes = require('./routes/sep10');
+const sep31Routes = require('./routes/sep31');
 
 const logger = require('./utils/logger');
 
@@ -60,6 +61,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/.well-known/stellar', sep10Routes);
+app.use('/api/sep31', sep31Routes);
 
 app.get('/health', (req, res) =>
   res.json({ status: 'ok', network: process.env.STELLAR_NETWORK || 'testnet' })
