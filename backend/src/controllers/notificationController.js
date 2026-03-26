@@ -1,5 +1,5 @@
 const db = require('../db');
-const webpush = require('web-push');
+const webpush = require('../services/webpush');
 const { startStreamForUser, stopStreamForUser } = require('../services/horizonWorker');
 
 /**
