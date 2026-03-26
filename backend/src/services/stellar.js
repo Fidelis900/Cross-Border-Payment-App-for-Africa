@@ -1,6 +1,9 @@
 const StellarSdk = require('@stellar/stellar-sdk');
 const crypto = require('crypto');
 const logger = require('../utils/logger');
+const { withRetry } = require('../utils/retry');
+
+const { withTimeout } = require('../utils/withTimeout');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
 const server = new StellarSdk.Horizon.Server(
@@ -52,7 +55,7 @@ async function createWallet() {
 // Get account balance
 async function getBalance(publicKey) {
   try {
-    const account = await server.loadAccount(publicKey);
+    const account = await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount' });
     return account.balances.map(b => ({
       asset: b.asset_type === 'native' ? 'XLM' : b.asset_code,
       balance: b.balance
@@ -80,7 +83,7 @@ function resolveAsset(asset) {
 async function checkTrustline(recipientPublicKey, assetObj) {
   let recipientAccount;
   try {
-    recipientAccount = await server.loadAccount(recipientPublicKey);
+    recipientAccount = await withRetry(() => server.loadAccount(recipientPublicKey), { label: 'loadAccount(recipient)' });
   } catch (e) {
     if (e.response?.status === 404) {
       const err = new Error('Recipient account does not exist on the Stellar network.');
@@ -185,10 +188,10 @@ async function sendPayment({
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await server.loadAccount(senderPublicKey);
+  const senderAccount = await withRetry(() => server.loadAccount(senderPublicKey), { label: 'loadAccount(sender)' });
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await server.fetchBaseFee(),
+    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.payment({
@@ -204,7 +207,7 @@ async function sendPayment({
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const result = await server.submitTransaction(transaction);
+  const result = await withRetry(() => server.submitTransaction(transaction), { label: 'submitTransaction' });
   return {
     transactionHash: result.hash,
     ledger: result.ledger
@@ -233,3 +236,116 @@ async function getTransactions(publicKey, limit = 20) {
 }
 
 module.exports = { createWallet, getBalance, sendPayment, getTransactions, decryptPrivateKey, resolveFederationAddress };
+/**
+ * Lightweight Horizon reachability check (SDK v12 has no serverInfo(); this is equivalent).
+ * Uses latest ledger page with a hard timeout.
+ */
+async function checkHorizonHealth() {
+  try {
+    await withTimeout(server.ledgers().order('desc').limit(1).call());
+    return true;
+  } catch {
+    return false;
+  }
+ * Find the best path for a strict-send cross-asset payment.
+ * Returns the top path result from Horizon's path-finding API.
+ *
+ * @param {string} sourceAsset       - Asset the sender is spending (e.g. 'XLM')
+ * @param {string} sourceAmount      - Amount the sender will spend
+ * @param {string} destinationAsset  - Asset the recipient should receive
+ * @param {string} destinationPublicKey - Recipient's Stellar public key
+ * @returns {{ destinationAmount, path }} or null if no path found
+ */
+async function findPaymentPath(sourceAsset, sourceAmount, destinationAsset, destinationPublicKey) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  const result = await server
+    .strictSendPaths(srcAsset, String(sourceAmount), [dstAsset])
+    .call();
+
+  if (!result.records || result.records.length === 0) return null;
+
+  // Pick the record with the highest destination_amount
+  const best = result.records.reduce((a, b) =>
+    parseFloat(a.destination_amount) >= parseFloat(b.destination_amount) ? a : b
+  );
+
+  return {
+    destinationAmount: best.destination_amount,
+    path: best.path,
+  };
+}
+
+/**
+ * Execute a strict-send path payment.
+ * Sender spends exactly `amount` of `sourceAsset`; recipient receives
+ * at least `destinationMinAmount` of `destinationAsset`.
+ */
+async function sendPathPayment({
+  senderPublicKey,
+  encryptedSecretKey,
+  recipientPublicKey,
+  sourceAsset,
+  sourceAmount,
+  destinationAsset,
+  destinationMinAmount,
+  path = [],
+  memo,
+}) {
+  const srcAsset = resolveAsset(sourceAsset);
+  const dstAsset = resolveAsset(destinationAsset);
+
+  // Trustline check for non-native destination asset
+  if (destinationAsset !== 'XLM') {
+    await checkTrustline(recipientPublicKey, dstAsset);
+  }
+
+  const secretKey = decryptPrivateKey(encryptedSecretKey);
+  const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
+  const senderAccount = await server.loadAccount(senderPublicKey);
+
+  // Convert path array (from Horizon) to StellarSdk Asset objects
+  const sdkPath = path.map((p) =>
+    p.asset_type === 'native'
+      ? StellarSdk.Asset.native()
+      : new StellarSdk.Asset(p.asset_code, p.asset_issuer)
+  );
+
+  const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
+    fee: await server.fetchBaseFee(),
+    networkPassphrase,
+  })
+    .addOperation(
+      StellarSdk.Operation.pathPaymentStrictSend({
+        sendAsset: srcAsset,
+        sendAmount: String(sourceAmount),
+        destination: recipientPublicKey,
+        destAsset: dstAsset,
+        destMin: String(destinationMinAmount),
+        path: sdkPath,
+      })
+    )
+    .setTimeout(30);
+
+  if (memo) txBuilder.addMemo(StellarSdk.Memo.text(memo.slice(0, 28)));
+
+  const transaction = txBuilder.build();
+  transaction.sign(senderKeypair);
+
+  const result = await server.submitTransaction(transaction);
+  return { transactionHash: result.hash, ledger: result.ledger };
+}
+
+module.exports = {
+  createWallet,
+  getBalance,
+  sendPayment,
+  getTransactions,
+  decryptPrivateKey,
+  checkHorizonHealth,
+  sendPathPayment,
+  findPaymentPath,
+  getTransactions,
+  decryptPrivateKey,
+};

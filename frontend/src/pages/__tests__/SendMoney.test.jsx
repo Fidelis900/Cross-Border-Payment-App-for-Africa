@@ -15,7 +15,12 @@ i18n.use(initReactI18next).init({
   resources: {
     en: {
       translation: {
-        common: { back: 'Back', cancel: 'Cancel' },
+        common: {
+          back: 'Back',
+          cancel: 'Cancel',
+          rates_disclaimer:
+            'Exchange rates are approximate and may be cached. Live prices refresh about every minute.',
+        },
         send: {
           title: 'Send Money',
           recipient_label: 'Recipient Address',
@@ -76,6 +81,16 @@ function renderComponent() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  localStorage.clear();
+  global.fetch = jest.fn(() =>
+    Promise.resolve({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          stellar: { usd: 0.11, ngn: 170, ghs: 1.35, kes: 14.5 },
+        }),
+    })
+  );
   api.get.mockResolvedValue({ data: { contacts: [] } });
   api.post.mockResolvedValue({ data: {} });
 });

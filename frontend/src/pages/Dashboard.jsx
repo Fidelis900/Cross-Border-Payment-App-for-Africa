@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Send, Download, RefreshCw, Copy, CheckCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
-import { truncateAddress, CURRENCIES, convertFromXLM } from '../utils/currency';
+import { truncateAddress } from '../utils/currency';
+import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
 
@@ -16,6 +17,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [selectedCurrency, setSelectedCurrency] = useState('XLM');
+  const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
 
   useEffect(() => {
     Promise.all([
@@ -68,7 +70,7 @@ export default function Dashboard() {
 
         {/* Currency selector */}
         <div className="flex gap-2 flex-wrap mb-4">
-          {CURRENCIES.map(c => (
+          {currencies.map(c => (
             <button
               key={c.code}
               onClick={() => setSelectedCurrency(c.code)}
@@ -82,6 +84,11 @@ export default function Dashboard() {
             </button>
           ))}
         </div>
+        {usingApproximateRates && (
+          <p className="text-primary-200/90 text-xs mb-3 leading-snug">
+            {t('common.rates_disclaimer')}
+          </p>
+        )}
 
         {/* Wallet address */}
         <div className="flex items-center gap-2 bg-primary-800/40 rounded-lg px-3 py-2">

@@ -9,13 +9,14 @@ const crypto = require('crypto');
 const db = require('../src/db');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../src/services/email');
 const { createWallet } = require('../src/services/stellar');
-const { register, login, refresh, logout, verifyEmail } = require('../src/controllers/authController');
 const {
   register,
   login,
+  refresh,
+  logout,
   verifyEmail,
   forgotPassword,
-  resetPassword
+  resetPassword,
 } = require('../src/controllers/authController');
 
 function mockRes() {
@@ -137,20 +138,19 @@ test('login: returns JWT when credentials valid and email verified', async () =>
   const hash = await bcrypt.hash('password1', 12);
   db.query
     .mockResolvedValueOnce({
-      rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }]
+      rows: [
+        {
+          id: '1',
+          full_name: 'Alice',
+          email: 'a@b.com',
+          password_hash: hash,
+          email_verified: true,
+          role: 'user',
+          public_key: 'GPUB',
+        },
+      ],
     })
     .mockResolvedValueOnce({ rows: [] }); // INSERT refresh_token
-  db.query.mockResolvedValueOnce({
-    rows: [{
-      id: '1',
-      full_name: 'Alice',
-      email: 'a@b.com',
-      password_hash: hash,
-      email_verified: true,
-      role: 'user',
-      public_key: 'GPUB'
-    }]
-  });
 
   const req = { body: { email: 'a@b.com', password: 'password1' } };
   const res = mockRes();
@@ -167,7 +167,17 @@ test('login: sets HttpOnly refreshToken cookie on success', async () => {
   const hash = await bcrypt.hash('password1', 12);
   db.query
     .mockResolvedValueOnce({
-      rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }]
+      rows: [
+        {
+          id: '1',
+          full_name: 'Alice',
+          email: 'a@b.com',
+          password_hash: hash,
+          email_verified: true,
+          role: 'user',
+          public_key: 'GPUB',
+        },
+      ],
     })
     .mockResolvedValueOnce({ rows: [] }); // INSERT refresh_token
 
@@ -178,7 +188,7 @@ test('login: sets HttpOnly refreshToken cookie on success', async () => {
   expect(res.cookie).toHaveBeenCalledWith(
     'refreshToken',
     expect.any(String),
-    expect.objectContaining({ httpOnly: true, sameSite: 'strict' })
+    expect.objectContaining({ httpOnly: true, sameSite: 'lax' })
   );
 });
 
@@ -187,7 +197,17 @@ test('login: stores hashed refresh token in DB, not the raw value', async () => 
   const hash = await bcrypt.hash('password1', 12);
   db.query
     .mockResolvedValueOnce({
-      rows: [{ id: '1', full_name: 'Alice', email: 'a@b.com', password_hash: hash, email_verified: true, public_key: 'GPUB' }]
+      rows: [
+        {
+          id: '1',
+          full_name: 'Alice',
+          email: 'a@b.com',
+          password_hash: hash,
+          email_verified: true,
+          role: 'user',
+          public_key: 'GPUB',
+        },
+      ],
     })
     .mockResolvedValueOnce({ rows: [] });
 

@@ -61,8 +61,21 @@ function renderDashboard() {
   );
 }
 
+const COINGECKO_FIXTURE = {
+  stellar: { usd: 0.11, ngn: 170, ghs: 1.35, kes: 14.5 },
+};
+
 describe('Dashboard', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => {
+    jest.clearAllMocks();
+    localStorage.clear();
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(COINGECKO_FIXTURE),
+      })
+    );
+  });
 
   test('shows loading spinner while fetching', () => {
     api.get.mockReturnValue(new Promise(() => {}));

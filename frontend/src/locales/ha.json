@@ -12,7 +12,8 @@
     "retry": "Sai Batta",
     "sign_out": "Fita",
     "no_transactions": "Ba a sami ma'amaloli ba",
-    "see_all": "Duba duka"
+    "see_all": "Duba duka",
+    "rates_disclaimer": "Kudaden canji suna kusa da gaske kuma za a iya adana su. Farashin na ainihi yana sabunta kowane minti."
   },
   "welcome": {
     "tagline": "Biyan kuɗi na ƙetare iyaka da sauri da aminci ta hanyar Stellar blockchain",
@@ -143,6 +144,14 @@
     "address_copied": "An kwafi adireshi!"
   },
   "history": {
+    "search_placeholder": "Bincika memo, adireshin, ko adadin",
+    "date_from": "Kwanan wata (daga)",
+    "date_to": "Kwanan wata (zuwa)",
+    "asset_label": "Dukiya",
+    "asset_all": "Duk dukiya",
+    "load_error": "An kasa loda ma'amaloli",
+    "load_more": "Kara loda",
+    "loading_more": "Ana loda...",
     "title": "Tarihi",
     "filter_all": "duka",
     "filter_sent": "aika",
