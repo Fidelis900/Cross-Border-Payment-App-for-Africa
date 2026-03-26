@@ -50,7 +50,6 @@ process.env.KYC_THRESHOLD_USD = '100';
 process.env.XLM_USD_RATE      = '0.11';
 
 const express      = require('express');
-const StellarSdk   = require('@stellar/stellar-sdk');
 const authMiddleware = require('../middleware/auth');
 const idempotency  = require('../middleware/idempotency');
 const { send, history } = require('../controllers/paymentController');
@@ -70,18 +69,6 @@ app.post(
   '/api/payments/send',
   authMiddleware,
   paymentSendValidators,
-  [
-    body('recipient_address')
-      .notEmpty().withMessage('Recipient address is required')
-      .custom((value) => {
-        if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
-          throw new Error('Invalid Stellar wallet address');
-        }
-        return true;
-      }),
-    body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
-    body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES'])
-  ],
   validate,
   idempotency,
   send
