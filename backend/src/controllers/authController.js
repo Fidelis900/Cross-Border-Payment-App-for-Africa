@@ -1,11 +1,10 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const { createWallet } = require('../services/stellar');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
-const { sendVerificationEmail } = require('../services/email');
+const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
@@ -13,14 +12,13 @@ const {
   generateRefreshToken,
   refreshTokenExpiresAt,
 } = require('../utils/tokens');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
 
 const TOKEN_TTL_MS = 96 * 60 * 60 * 1000; // 96 hours
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 const FORGOT_PASSWORD_MESSAGE = {
   message:
-    'If an account exists for this email, you will receive password reset instructions shortly.'
+    'If an account exists for this email, you will receive password reset instructions shortly.',
 };
 
 function generateVerificationToken() {
@@ -58,11 +56,10 @@ async function register(req, res, next) {
     await db.query('COMMIT');
 
     await sendVerificationEmail(email, raw);
-    const token = jwt.sign({ userId, email, role: 'user' }, process.env.JWT_SECRET, {
-      expiresIn: process.env.JWT_EXPIRES_IN || '7d'
-    });
 
-    res.status(201).json({ message: 'Account created. Please verify your email before logging in.' });
+    res.status(201).json({
+      message: 'Account created. Please verify your email before logging in.',
+    });
   } catch (err) {
     await db.query('ROLLBACK').catch(() => {});
     next(err);
@@ -89,10 +86,8 @@ async function login(req, res, next) {
       return res.status(403).json({ error: 'Please verify your email before logging in.' });
     }
 
-    // Issue short-lived access token
     const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
 
-    // Issue refresh token — store only the hash in DB
     const { raw, hash } = generateRefreshToken();
     const expiresAt = refreshTokenExpiresAt();
     await db.query(
@@ -101,12 +96,16 @@ async function login(req, res, next) {
       [uuidv4(), user.id, hash, expiresAt]
     );
 
-    // Set refresh token as HttpOnly cookie
     res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
 
     res.json({
       token,
-      user: { id: user.id, full_name: user.full_name, email: user.email, wallet_address: user.public_key }
+      user: {
+        id: user.id,
+        full_name: user.full_name,
+        email: user.email,
+        wallet_address: user.public_key,
+      },
     });
   } catch (err) {
     next(err);
@@ -158,7 +157,7 @@ async function getMe(req, res, next) {
       email: u.email,
       phone: u.phone,
       wallet_address: u.public_key,
-      pin_setup_completed: u.pin_setup_completed
+      pin_setup_completed: u.pin_setup_completed,
     });
   } catch (err) {
     next(err);
@@ -170,19 +169,16 @@ async function setPIN(req, res, next) {
     const { pin } = req.body;
     const userId = req.user.userId;
 
-    // Validate PIN format
     if (!validatePIN(pin)) {
       return res.status(400).json({ error: 'PIN must be 4-6 digits' });
     }
 
-    // Hash the PIN
     const pinHash = await hashPIN(pin);
 
-    // Update user's PIN hash and mark PIN setup as completed
-    await db.query(
-      `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
-      [pinHash, userId]
-    );
+    await db.query(`UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`, [
+      pinHash,
+      userId,
+    ]);
 
     res.json({ message: 'PIN set successfully' });
   } catch (err) {
@@ -195,11 +191,7 @@ async function verifyPIN(req, res, next) {
     const { pin } = req.body;
     const userId = req.user.userId;
 
-    // Retrieve user's PIN hash
-    const result = await db.query(
-      `SELECT pin_hash FROM users WHERE id = $1`,
-      [userId]
-    );
+    const result = await db.query(`SELECT pin_hash FROM users WHERE id = $1`, [userId]);
 
     if (!result.rows[0]) {
       return res.status(404).json({ error: 'User not found' });
@@ -207,12 +199,10 @@ async function verifyPIN(req, res, next) {
 
     const { pin_hash } = result.rows[0];
 
-    // Check if PIN is set
     if (!pin_hash) {
       return res.status(400).json({ error: 'PIN not configured. Please set up a PIN first.' });
     }
 
-    // Verify PIN
     const isPINValid = await comparePIN(pin, pin_hash);
     if (!isPINValid) {
       return res.status(401).json({ error: 'Invalid PIN' });
@@ -231,7 +221,6 @@ async function refresh(req, res, next) {
 
     const hash = crypto.createHash('sha256').update(raw).digest('hex');
 
-    // Look up the token — must exist and not be expired
     const result = await db.query(
       `SELECT rt.id, rt.user_id, rt.expires_at,
               u.email, u.role
@@ -244,13 +233,11 @@ async function refresh(req, res, next) {
     const record = result.rows[0];
     if (!record) return res.status(401).json({ error: 'Invalid refresh token' });
     if (new Date(record.expires_at) < new Date()) {
-      // Clean up expired token
       await db.query('DELETE FROM refresh_tokens WHERE id = $1', [record.id]);
       res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
       return res.status(401).json({ error: 'Refresh token expired' });
     }
 
-    // Rotate: delete old token, issue new one
     const { raw: newRaw, hash: newHash } = generateRefreshToken();
     const expiresAt = refreshTokenExpiresAt();
 
@@ -261,35 +248,14 @@ async function refresh(req, res, next) {
       [uuidv4(), record.user_id, newHash, expiresAt]
     );
 
-    const token = signAccessToken({ userId: record.user_id, email: record.email, role: record.role });
+    const token = signAccessToken({
+      userId: record.user_id,
+      email: record.email,
+      role: record.role,
+    });
 
     res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
     res.json({ token });
-module.exports = { register, login, verifyEmail, getMe, setPIN, verifyPIN };
-async function forgotPassword(req, res, next) {
-  try {
-    const email = req.body.email;
-    const found = await db.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (found.rows.length === 0) {
-      return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
-    }
-
-    const userId = found.rows[0].id;
-    const raw = crypto.randomBytes(32).toString('hex');
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
-
-    await db.query(
-      'DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at IS NULL',
-      [userId]
-    );
-    await db.query(
-      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [userId, tokenHash, expiresAt]
-    );
-
-    await sendPasswordResetEmail(email, raw);
-    return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
   } catch (err) {
     next(err);
   }
@@ -305,6 +271,38 @@ async function logout(req, res, next) {
     res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
     res.json({ message: 'Logged out successfully' });
   } catch (err) {
+    next(err);
+  }
+}
+
+async function forgotPassword(req, res, next) {
+  try {
+    const email = req.body.email;
+    const found = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (found.rows.length === 0) {
+      return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
+    }
+
+    const userId = found.rows[0].id;
+    const raw = crypto.randomBytes(32).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+
+    await db.query('DELETE FROM password_reset_tokens WHERE user_id = $1 AND used_at IS NULL', [
+      userId,
+    ]);
+    await db.query(
+      `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [userId, tokenHash, expiresAt]
+    );
+
+    await sendPasswordResetEmail(email, raw);
+    return res.status(200).json(FORGOT_PASSWORD_MESSAGE);
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function resetPassword(req, res, next) {
   try {
     const { token, password } = req.body;
@@ -341,14 +339,15 @@ async function resetPassword(req, res, next) {
   }
 }
 
-module.exports = { register, login, refresh, logout, verifyEmail, getMe, setPIN, verifyPIN };
 module.exports = {
   register,
   login,
+  refresh,
+  logout,
   verifyEmail,
   getMe,
   setPIN,
   verifyPIN,
   forgotPassword,
-  resetPassword
+  resetPassword,
 };

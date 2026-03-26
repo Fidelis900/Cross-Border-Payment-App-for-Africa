@@ -1,4 +1,5 @@
 const { body } = require('express-validator');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 const MEMO_ID_MAX = 2n ** 64n - 1n;
 
@@ -6,7 +7,14 @@ const MEMO_ID_MAX = 2n ** 64n - 1n;
  * Shared validators for POST /payments/send (used by routes and integration tests).
  */
 module.exports = [
-  body('recipient_address').notEmpty().withMessage('Recipient address is required'),
+  body('recipient_address')
+    .notEmpty().withMessage('Recipient address is required')
+    .custom((value) => {
+      if (!StellarSdk.StrKey.isValidEd25519PublicKey(value)) {
+        throw new Error('Invalid Stellar wallet address');
+      }
+      return true;
+    }),
   body('amount').isFloat({ gt: 0 }).withMessage('Amount must be greater than 0'),
   body('asset').optional().isIn(['XLM', 'USDC', 'NGN', 'GHS', 'KES']),
   body('memo').optional().trim(),
