@@ -6,12 +6,63 @@ const { withTimeout } = require('../utils/withTimeout');
 const { enqueue } = require('../utils/txQueue');
 
 const isTestnet = process.env.STELLAR_NETWORK !== 'mainnet';
-const server = new StellarSdk.Horizon.Server(
-  process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org'
-);
 const networkPassphrase = isTestnet
   ? StellarSdk.Networks.TESTNET
   : StellarSdk.Networks.PUBLIC;
+
+const primaryUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
+const fallbackUrl = process.env.STELLAR_HORIZON_FALLBACK_URL || null;
+
+const server = new StellarSdk.Horizon.Server(primaryUrl);
+const fallbackServer = fallbackUrl ? new StellarSdk.Horizon.Server(fallbackUrl) : null;
+
+/**
+ * Returns true if the error is a network-level failure (connection refused,
+ * timeout, DNS) rather than a Stellar protocol error (bad sequence, no trust,
+ * HTTP 400 from Horizon, etc.).
+ */
+function isNetworkError(err) {
+  // Stellar protocol errors always carry an HTTP response
+  if (err.response) return false;
+  // Node.js network error codes
+  const networkCodes = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'ECONNABORTED'];
+  if (err.code && networkCodes.includes(err.code)) return true;
+  // Fetch/axios timeout or network failure with no response
+  if (err.name === 'NetworkError' || err.message?.toLowerCase().includes('network')) return true;
+  return false;
+}
+
+/**
+ * Execute fn(server) with automatic failover to the fallback node on network errors only.
+ */
+async function withFallback(fn) {
+  try {
+    const result = await fn(server);
+    logger.debug('Horizon request succeeded', { node: 'primary', url: primaryUrl });
+    return result;
+  } catch (primaryErr) {
+    if (!isNetworkError(primaryErr) || !fallbackServer) {
+      throw primaryErr;
+    }
+    logger.warn('Primary Horizon node unreachable, trying fallback', {
+      primaryUrl,
+      fallbackUrl,
+      error: primaryErr.message,
+    });
+    try {
+      const result = await fn(fallbackServer);
+      logger.info('Horizon request succeeded on fallback node', { url: fallbackUrl });
+      return result;
+    } catch (fallbackErr) {
+      const err = new Error(
+        `Both Horizon nodes are unavailable. Primary: ${primaryErr.message}. Fallback: ${fallbackErr.message}`
+      );
+      err.primaryError = primaryErr;
+      err.fallbackError = fallbackErr;
+      throw err;
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Key encryption helpers
@@ -60,7 +111,7 @@ async function createWallet() {
 
 async function getBalance(publicKey) {
   try {
-    const account = await withRetry(() => server.loadAccount(publicKey), { label: 'loadAccount' });
+    const account = await withRetry(() => withFallback(s => s.loadAccount(publicKey)), { label: 'loadAccount' });
     return account.balances.map(b => ({
       asset: b.asset_type === 'native' ? 'XLM' : b.asset_code,
       balance: b.balance
@@ -89,7 +140,7 @@ function resolveAsset(asset) {
 async function checkTrustline(recipientPublicKey, assetObj) {
   let recipientAccount;
   try {
-    recipientAccount = await withRetry(() => server.loadAccount(recipientPublicKey), { label: 'loadAccount(recipient)' });
+    recipientAccount = await withRetry(() => withFallback(s => s.loadAccount(recipientPublicKey)), { label: 'loadAccount(recipient)' });
   } catch (e) {
     if (e.response?.status === 404) {
       const err = new Error('Recipient account does not exist on the Stellar network.');
@@ -191,10 +242,10 @@ async function createClaimableBalance({
   const assetObj = resolveAsset(asset);
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await withRetry(() => server.loadAccount(senderPublicKey), { label: 'loadAccount(sender)' });
+  const senderAccount = await withRetry(() => withFallback(s => s.loadAccount(senderPublicKey)), { label: 'loadAccount(sender)' });
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' }),
+    fee: await withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' }),
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.createClaimableBalance({
@@ -212,7 +263,7 @@ async function createClaimableBalance({
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const result = await withRetry(() => server.submitTransaction(transaction), { label: 'submitTransaction' });
+  const result = await withRetry(() => withFallback(s => s.submitTransaction(transaction)), { label: 'submitTransaction' });
   return { transactionHash: result.hash, ledger: result.ledger };
 }
 
@@ -252,10 +303,10 @@ async function _sendPaymentOnce({
   for (let attempt = 0; attempt < MAX_SEQ_RETRIES; attempt++) {
     try {
       // Fetch a fresh sequence number on every attempt
-      const senderAccount = await server.loadAccount(senderPublicKey);
+      const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey));
 
       const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-        fee: await server.fetchBaseFee(),
+        fee: await withFallback(s => s.fetchBaseFee()),
         networkPassphrase
       })
         .addOperation(StellarSdk.Operation.payment({
@@ -271,7 +322,7 @@ async function _sendPaymentOnce({
       const transaction = txBuilder.build();
       transaction.sign(senderKeypair);
 
-      const result = await server.submitTransaction(transaction);
+      const result = await withFallback(s => s.submitTransaction(transaction));
       return { transactionHash: result.hash, ledger: result.ledger, type: 'payment' };
     } catch (err) {
       if (isBadSeq(err) && attempt < MAX_SEQ_RETRIES - 1) {
@@ -305,12 +356,9 @@ async function _sendPaymentOnce({
 
 async function getTransactions(publicKey, limit = 20) {
   try {
-    const records = await server
-      .transactions()
-      .forAccount(publicKey)
-      .limit(limit)
-      .order('desc')
-      .call();
+    const records = await withFallback(s =>
+      s.transactions().forAccount(publicKey).limit(limit).order('desc').call()
+    );
     return records.records.map(tx => ({
       id: tx.id,
       hash: tx.hash,
@@ -328,7 +376,7 @@ async function getTransactions(publicKey, limit = 20) {
 // ---------------------------------------------------------------------------
 
 async function fetchFee() {
-  return withRetry(() => server.fetchBaseFee(), { label: 'fetchBaseFee' });
+  return withRetry(() => withFallback(s => s.fetchBaseFee()), { label: 'fetchBaseFee' });
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +385,7 @@ async function fetchFee() {
 
 async function checkHorizonHealth() {
   try {
-    await withTimeout(server.ledgers().order('desc').limit(1).call());
+    await withTimeout(withFallback(s => s.ledgers().order('desc').limit(1).call()));
     return true;
   } catch {
     return false;
@@ -352,9 +400,9 @@ async function findPaymentPath(sourceAsset, sourceAmount, destinationAsset) {
   const srcAsset = resolveAsset(sourceAsset);
   const dstAsset = resolveAsset(destinationAsset);
 
-  const result = await server
-    .strictSendPaths(srcAsset, String(sourceAmount), [dstAsset])
-    .call();
+  const result = await withFallback(s =>
+    s.strictSendPaths(srcAsset, String(sourceAmount), [dstAsset]).call()
+  );
 
   if (!result.records || result.records.length === 0) return null;
 
@@ -385,7 +433,7 @@ async function sendPathPayment({
 
   const secretKey = decryptPrivateKey(encryptedSecretKey);
   const senderKeypair = StellarSdk.Keypair.fromSecret(secretKey);
-  const senderAccount = await server.loadAccount(senderPublicKey);
+  const senderAccount = await withFallback(s => s.loadAccount(senderPublicKey));
 
   const sdkPath = path.map(p =>
     p.asset_type === 'native'
@@ -394,7 +442,7 @@ async function sendPathPayment({
   );
 
   const txBuilder = new StellarSdk.TransactionBuilder(senderAccount, {
-    fee: await server.fetchBaseFee(),
+    fee: await withFallback(s => s.fetchBaseFee()),
     networkPassphrase
   })
     .addOperation(StellarSdk.Operation.pathPaymentStrictSend({
@@ -412,7 +460,7 @@ async function sendPathPayment({
   const transaction = txBuilder.build();
   transaction.sign(senderKeypair);
 
-  const result = await server.submitTransaction(transaction);
+  const result = await withFallback(s => s.submitTransaction(transaction));
   return { transactionHash: result.hash, ledger: result.ledger };
 }
 
