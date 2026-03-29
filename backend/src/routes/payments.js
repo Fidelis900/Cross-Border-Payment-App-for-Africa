@@ -16,6 +16,7 @@ const { send, history, findPath, sendPath } = require('../controllers/paymentCon
 const { send, history, exportCSV } = require('../controllers/paymentController');
 const { send, history } = require('../controllers/paymentController');
 const { resolveFederationAddress } = require('../services/stellar');
+const { isMemoRequired } = require('../services/memoRequired');
 const paymentSendValidators = require('../validators/paymentSendValidators');
 const { ALLOWED_HISTORY_ASSETS } = require('../utils/historyQuery');
 
@@ -67,6 +68,20 @@ router.get('/resolve-federation',
       res.json({ public_key: publicKey });
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
+    }
+  }
+);
+
+// Memo requirement check
+router.get('/memo-required',
+  [query('address').notEmpty().withMessage('Address is required')],
+  validate,
+  async (req, res) => {
+    try {
+      const required = await isMemoRequired(req.query.address);
+      res.json({ memo_required: required });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
   }
 );

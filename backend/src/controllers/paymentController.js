@@ -1,12 +1,12 @@
 const { v4: uuidv4 } = require("uuid");
 const { stringify } = require("csv-stringify/sync");
 const db = require("../db");
-const { sendPayment, fetchFee } = require("../services/stellar");
-const { sendPayment, sendPathPayment, findPaymentPath } = require("../services/stellar");
+const { sendPayment, sendPathPayment, findPaymentPath, fetchFee } = require("../services/stellar");
 const webhook = require("../services/webhook");
 const cache = require("../utils/cache");
 const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset } = require("../utils/historyQuery");
+const { isMemoRequired } = require("../services/memoRequired");
 
 // Configurable KYC transaction threshold in USD equivalent
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
@@ -15,8 +15,6 @@ const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || "0.11");
 
 // Daily send limit per user
-const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "10000");
-// Configurable daily send limit
 const DAILY_SEND_LIMIT = parseFloat(process.env.DAILY_SEND_LIMIT || "50000");
 
 function estimateUSDValue(amount, asset) {
@@ -25,44 +23,6 @@ function estimateUSDValue(amount, asset) {
   return 0; // unknown assets default to 0 — do not block
 }
 
-// Basic fraud check: block if >5 transactions in last 10 minutes
-async function fraudCheck(walletAddress) {
-  const result = await db.query(
-    `SELECT COUNT(*) FROM transactions
-     WHERE sender_wallet = $1 AND created_at > NOW() - INTERVAL '10 minutes'`,
-    [walletAddress],
-  );
-  return parseInt(result.rows[0].count) >= 5;
-}
-
-async function estimateFee(req, res, next) {
-  try {
-    const fee = await fetchFee();
-    res.json({ fee_stroops: fee, fee_xlm: (fee / 1e7).toFixed(7) });
-  } catch (err) {
-    next(err);
-  }
-// Check daily send limit for user
-async function checkDailyLimit(walletAddress, currentAmount, asset) {
-  const result = await db.query(
-    `SELECT COALESCE(SUM(amount), 0) as total_sent
-     FROM transactions
-     WHERE sender_wallet = $1 
-       AND asset = $2
-       AND status = 'completed'
-       AND created_at > NOW() - INTERVAL '24 hours'`,
-    [walletAddress, asset],
-  );
-  
-  const totalSent = parseFloat(result.rows[0].total_sent);
-  const newTotal = totalSent + parseFloat(currentAmount);
-  
-  return {
-    exceeded: newTotal > DAILY_SEND_LIMIT,
-    totalSent,
-    limit: DAILY_SEND_LIMIT,
-    remaining: Math.max(0, DAILY_SEND_LIMIT - totalSent)
-  };
 /**
  * Daily send limit check.
  * Sums all completed/pending transactions sent today (UTC) for this wallet.
@@ -81,11 +41,19 @@ async function dailyLimitExceeded(walletAddress, amount) {
   return totalToday + parseFloat(amount) > DAILY_SEND_LIMIT;
 }
 
+async function estimateFee(req, res, next) {
+  try {
+    const fee = await fetchFee();
+    res.json({ fee_stroops: fee, fee_xlm: (fee / 1e7).toFixed(7) });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function send(req, res, next) {
   const txId = uuidv4();
   // Hoist these so the catch block can reference them for the failed-tx INSERT
   let public_key;
-  const { recipient_address, amount, asset = "XLM", memo } = req.body;
   try {
     const { recipient_address, amount, asset = "XLM", memo: rawMemo, memo_type: rawMemoType } = req.body;
     const memo = typeof rawMemo === "string" ? rawMemo.trim() : "";
@@ -122,7 +90,7 @@ async function send(req, res, next) {
 
     // Prevent self-payment
     if (recipient_address === public_key) {
-      return res.status(400).json({ error: 'Cannot send payment to your own wallet' });
+      return res.status(400).json({ error: "Cannot send payment to your own wallet" });
     }
 
     // Daily send limit check
@@ -130,7 +98,7 @@ async function send(req, res, next) {
     if (overLimit) {
       return res.status(400).json({
         error: `Daily send limit of ${DAILY_SEND_LIMIT} reached. Try again tomorrow.`,
-        code: 'DAILY_LIMIT_EXCEEDED',
+        code: "DAILY_LIMIT_EXCEEDED",
       });
     }
 
@@ -138,23 +106,14 @@ async function send(req, res, next) {
     const fraudCheck = await checkFraud(public_key, amount, asset);
     if (fraudCheck.blocked) {
       await logFraudBlock(public_key, fraudCheck.reason, amount, asset);
-      return res
-        .status(429)
-        .json({ error: fraudCheck.reason });
+      return res.status(429).json({ error: fraudCheck.reason });
     }
 
-    // Daily send limit check
-    const dailyLimit = await checkDailyLimit(public_key, amount, asset);
-    if (dailyLimit.exceeded) {
-      return res.status(400).json({
-        error: `Daily send limit exceeded. You have sent ${dailyLimit.totalSent} ${asset} in the last 24 hours. Limit: ${dailyLimit.limit} ${asset}`,
-        code: 'DAILY_LIMIT_EXCEEDED',
-        details: {
-          totalSent: dailyLimit.totalSent,
-          limit: dailyLimit.limit,
-          remaining: dailyLimit.remaining,
-          asset
-        }
+    // Memo requirement check
+    if (await isMemoRequired(recipient_address) && !memo) {
+      return res.status(422).json({
+        error: "This address requires a memo to route your payment correctly. Please include a memo.",
+        code: "MEMO_REQUIRED",
       });
     }
 
@@ -170,7 +129,7 @@ async function send(req, res, next) {
     });
 
     // Save to DB
-    const txStatus = type === 'claimable_balance' ? 'pending_claim' : 'completed';
+    const txStatus = type === "claimable_balance" ? "pending_claim" : "completed";
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, memo_type, tx_hash, status, claimable_balance_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
@@ -181,13 +140,13 @@ async function send(req, res, next) {
     await cache.del(`balance:${public_key}`);
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, amount, asset, sender: public_key, recipient: recipient_address, type };
-    webhook.deliver('payment.sent', txData).catch(() => {});
-    if (type !== 'claimable_balance') {
-      webhook.deliver('payment.received', txData).catch(() => {});
+    webhook.deliver("payment.sent", txData).catch(() => {});
+    if (type !== "claimable_balance") {
+      webhook.deliver("payment.received", txData).catch(() => {});
     }
 
     res.json({
-      message: type === 'claimable_balance' ? "Claimable balance created" : "Payment sent successfully",
+      message: type === "claimable_balance" ? "Claimable balance created" : "Payment sent successfully",
       transaction: {
         id: txId,
         tx_hash: transactionHash,
@@ -196,18 +155,17 @@ async function send(req, res, next) {
         asset,
         recipient: recipient_address,
         type,
-        claimableBalanceId
+        claimableBalanceId,
       },
     });
   } catch (err) {
-
     if (err.status === 400 || err.status === 500) {
-      webhook.deliver('payment.failed', { error: err.message }).catch(() => {});
+      webhook.deliver("payment.failed", { error: err.message }).catch(() => {});
       return res.status(err.status).json({ error: err.message });
     }
     if (err.response?.data) {
       const extras = err.response.data?.extras;
-      webhook.deliver('payment.failed', { error: 'Transaction failed', details: extras }).catch(() => {});
+      webhook.deliver("payment.failed", { error: "Transaction failed", details: extras }).catch(() => {});
       return res.status(400).json({ error: "Transaction failed", details: extras });
     }
     next(err);
@@ -307,7 +265,7 @@ async function findPath(req, res, next) {
     const { source_asset, source_amount, destination_asset, recipient_address } = req.body;
     const result = await findPaymentPath(source_asset, source_amount, destination_asset, recipient_address);
     if (!result) {
-      return res.status(404).json({ error: 'No conversion path found between these assets' });
+      return res.status(404).json({ error: "No conversion path found between these assets" });
     }
     res.json(result);
   } catch (err) {
@@ -327,7 +285,7 @@ async function sendPath(req, res, next) {
   try {
     ({
       recipient_address,
-      source_asset = 'XLM',
+      source_asset = "XLM",
       source_amount,
       destination_asset,
       destination_min_amount,
@@ -338,32 +296,34 @@ async function sendPath(req, res, next) {
     // KYC check
     const estimatedUSD = estimateUSDValue(source_amount, source_asset);
     if (estimatedUSD >= KYC_THRESHOLD_USD) {
-      const kycResult = await db.query('SELECT kyc_status FROM users WHERE id = $1', [req.user.userId]);
-      const kycStatus = kycResult.rows[0]?.kyc_status || 'unverified';
-      if (kycStatus !== 'verified') {
+      const kycResult = await db.query("SELECT kyc_status FROM users WHERE id = $1", [req.user.userId]);
+      const kycStatus = kycResult.rows[0]?.kyc_status || "unverified";
+      if (kycStatus !== "verified") {
         return res.status(403).json({
           error: `KYC verification required for transactions above $${KYC_THRESHOLD_USD} USD equivalent.`,
           kyc_status: kycStatus,
-          code: 'KYC_REQUIRED',
+          code: "KYC_REQUIRED",
         });
       }
     }
 
     const walletResult = await db.query(
-      'SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1',
+      "SELECT public_key, encrypted_secret_key FROM wallets WHERE user_id = $1",
       [req.user.userId],
     );
-    if (!walletResult.rows[0]) return res.status(404).json({ error: 'Wallet not found' });
+    if (!walletResult.rows[0]) return res.status(404).json({ error: "Wallet not found" });
 
-    ({ public_key, encrypted_secret_key } = walletResult.rows[0]);
+    ({ public_key } = walletResult.rows[0]);
+    const { encrypted_secret_key } = walletResult.rows[0];
 
     if (recipient_address === public_key) {
-      return res.status(400).json({ error: 'Cannot send payment to your own wallet' });
+      return res.status(400).json({ error: "Cannot send payment to your own wallet" });
     }
 
-    const isSuspicious = await fraudCheck(public_key);
-    if (isSuspicious) {
-      return res.status(429).json({ error: 'Transaction limit reached. Please wait before sending again.' });
+    const fraudCheck = await checkFraud(public_key, source_amount, source_asset);
+    if (fraudCheck.blocked) {
+      await logFraudBlock(public_key, fraudCheck.reason, source_amount, source_asset);
+      return res.status(429).json({ error: fraudCheck.reason });
     }
 
     const { transactionHash, ledger } = await sendPathPayment({
@@ -385,26 +345,30 @@ async function sendPath(req, res, next) {
     );
 
     const txData = { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, sender: public_key, recipient: recipient_address };
-    webhook.deliver('payment.sent', txData).catch(() => {});
-    webhook.deliver('payment.received', txData).catch(() => {});
+    webhook.deliver("payment.sent", txData).catch(() => {});
+    webhook.deliver("payment.received", txData).catch(() => {});
 
     res.json({
-      message: 'Path payment sent successfully',
+      message: "Path payment sent successfully",
       transaction: { id: txId, tx_hash: transactionHash, ledger, source_amount, source_asset, destination_asset, recipient: recipient_address },
     });
   } catch (err) {
     await db.query(
       `INSERT INTO transactions (id, sender_wallet, recipient_wallet, amount, asset, memo, tx_hash, status)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'failed')`,
-      [txId, public_key || '', recipient_address || '', source_amount || '0', source_asset || 'XLM', null, null],
+      [txId, public_key || "", recipient_address || "", source_amount || "0", source_asset || "XLM", null, null],
     ).catch(() => {});
 
     if (err.status === 400 || err.status === 500) {
       return res.status(err.status).json({ error: err.message });
     }
     if (err.response?.data) {
-      return res.status(400).json({ error: 'Path payment failed', details: err.response.data?.extras });
+      return res.status(400).json({ error: "Path payment failed", details: err.response.data?.extras });
     }
+    next(err);
+  }
+}
+
 async function exportCSV(req, res, next) {
   try {
     const walletResult = await db.query(
@@ -467,6 +431,4 @@ async function exportCSV(req, res, next) {
   }
 }
 
-module.exports = { send, history, exportCSV, estimateFee };
-module.exports = { send, history, findPath, sendPath };
-module.exports = { send, history, exportCSV };
+module.exports = { send, history, findPath, sendPath, exportCSV, estimateFee };

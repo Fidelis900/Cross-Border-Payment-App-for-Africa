@@ -41,6 +41,7 @@ export default function SendMoney() {
   const { currencies, convertFromXLM, usingApproximateRates } = useExchangeRates();
   const [pathResult, setPathResult] = useState(null);
   const [pathLoading, setPathLoading] = useState(false);
+  const [memoRequired, setMemoRequired] = useState(false);
 
   const isCrossAsset = form.destination_asset && form.destination_asset !== form.asset;
 
@@ -151,6 +152,16 @@ export default function SendMoney() {
     const timer = setTimeout(findPath, 600);
     return () => clearTimeout(timer);
   }, [findPath]);
+
+  const checkMemoRequired = useCallback(async (address) => {
+    if (!address || address.length < 56) { setMemoRequired(false); return; }
+    try {
+      const res = await api.get('/payments/memo-required', { params: { address } });
+      setMemoRequired(res.data.memo_required === true);
+    } catch {
+      setMemoRequired(false);
+    }
+  }, []);
 
   const estimatedValue = form.amount && form.asset === 'XLM'
     ? `≈ ${convertFromXLM(form.amount, 'USD')} USD`
@@ -277,7 +288,8 @@ export default function SendMoney() {
             required
             placeholder={t('send.recipient_placeholder') || 'Wallet address or username*domain'}
             value={form.recipient_address}
-            onChange={e => setForm({ ...form, recipient_address: e.target.value })}
+            onChange={e => { setForm({ ...form, recipient_address: e.target.value }); setMemoRequired(false); }}
+            onBlur={e => checkMemoRequired(e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-primary-500 transition-colors font-mono text-sm"
           />
           {showContacts && contacts.length > 0 && (
@@ -329,6 +341,12 @@ export default function SendMoney() {
             </div>
           )}
         </div>
+
+        {memoRequired && !form.memo.trim() && (
+          <div className="bg-yellow-500/10 border border-yellow-500/40 rounded-xl px-4 py-3 text-yellow-400 text-sm">
+            ⚠️ This address requires a memo. Payments without a memo may be lost.
+          </div>
+        )}
 
         {/* Amount + Source Asset */}
         <div>
@@ -498,7 +516,7 @@ export default function SendMoney() {
         <button
           ref={submitButtonRef}
           type="submit"
-          disabled={loading || (isCrossAsset && !pathResult)}
+          disabled={loading || (isCrossAsset && !pathResult) || (memoRequired && !form.memo.trim())}
           className={`w-full font-semibold py-3.5 rounded-xl flex items-center justify-center gap-2 transition-colors ${
             confirmed
               ? 'bg-yellow-500 hover:bg-yellow-600 text-black'
