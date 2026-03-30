@@ -27,8 +27,12 @@ case "$TARGET_CONTRACT" in
     CONTRACT_NAME="recurring_payments_contract"
     CONTRACT_SUBDIR="recurring-payments"
     ;;
+  agent-escrow)
+    CONTRACT_NAME="agent_escrow_contract"
+    CONTRACT_SUBDIR="agent-escrow"
+    ;;
   *)
-    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments${NC}"
+    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, agent-escrow${NC}"
     exit 1
     ;;
 esac

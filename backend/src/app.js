@@ -23,6 +23,7 @@ const stellarTomlRoutes = require('./routes/stellarToml');
 const analyticsRoutes = require('./routes/analytics');
 const dexRoutes = require('./routes/dex');
 const supportRoutes = require('./routes/support');
+const agentEscrowRoutes = require('./routes/agentEscrow');
 
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
@@ -74,6 +75,7 @@ app.use('/api/anchor', anchorRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/dex', dexRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/escrow', agentEscrowRoutes);
 app.use('/api/kyc', kycRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/webhooks', webhookRoutes);
