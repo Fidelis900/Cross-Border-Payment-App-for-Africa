@@ -57,6 +57,24 @@ jobs:
         cd backend
         npm ci
 
+    - name: Lint (backend)
+      if: matrix.component == 'backend'
+      # continue-on-error: repo has pre-existing lint debt (~2.5k violations);
+      # this makes new violations visible without blocking merges until that's paid down
+      continue-on-error: true
+      run: |
+        cd backend
+        npm run lint
+
+    - name: Audit dependencies (backend)
+      if: matrix.component == 'backend'
+      # continue-on-error: known pre-existing advisories in transitive deps
+      # (e.g. ws, uuid via node-cron); informational until addressed in a follow-up
+      continue-on-error: true
+      run: |
+        cd backend
+        npm audit --audit-level=high
+
     - name: Check for undeclared dependencies (backend)
       if: matrix.component == 'backend'
       run: |
@@ -75,12 +93,30 @@ jobs:
         cd backend
         node scripts/check-migration-prefixes.js
 
-    - name: Install frontend deps  
+    - name: Install frontend deps
       if: matrix.component == 'frontend'
       run: |
         cd frontend
         npm ci
-    
+
+    - name: Lint (frontend)
+      if: matrix.component == 'frontend'
+      # continue-on-error: repo has pre-existing lint debt (~800 violations);
+      # this makes new violations visible without blocking merges until that's paid down
+      continue-on-error: true
+      run: |
+        cd frontend
+        npm run lint
+
+    - name: Audit dependencies (frontend)
+      if: matrix.component == 'frontend'
+      # continue-on-error: known pre-existing advisories in transitive deps
+      # (e.g. ws, websocket-driver via react-scripts/webpack-dev-server); informational for now
+      continue-on-error: true
+      run: |
+        cd frontend
+        npm audit --audit-level=high
+
     - name: Run backend tests
       if: matrix.component == 'backend'
       run: |
@@ -129,6 +165,7 @@ jobs:
       with:
         # Needed to compile Soroban contracts to WASM (matches contracts/deploy.sh)
         targets: wasm32-unknown-unknown
+        components: clippy
 
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -155,6 +192,27 @@ jobs:
         for manifest in contracts/*/Cargo.toml; do
           echo "=== Testing $(dirname "$manifest")/ ==="
           cargo test --manifest-path "$manifest"
+        done
+
+    - name: Clippy (all contracts)
+      # continue-on-error: first run of clippy in this repo; not yet triaged.
+      # Makes lints visible without blocking merges until baseline is assessed.
+      continue-on-error: true
+      run: |
+        set -e
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Clippy $(dirname "$manifest")/ ==="
+          cargo clippy --manifest-path "$manifest" --target wasm32-unknown-unknown --release -- -D warnings
+        done
+
+    - name: Audit dependencies (contracts)
+      # continue-on-error: known-advisory triage hasn't happened yet; informational for now
+      continue-on-error: true
+      run: |
+        cargo install cargo-audit --locked
+        for manifest in contracts/*/Cargo.toml; do
+          echo "=== Audit $(dirname "$manifest")/ ==="
+          cargo audit --file "$(dirname "$manifest")/Cargo.lock" || true
         done
 
   e2e:

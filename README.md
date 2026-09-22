@@ -91,12 +91,16 @@ The system is transparent, auditable on Stellar Explorer, and modular enough to 
 │   │       └── currency.js             # XLM conversion rates + formatters
 │   ├── .env.example
 │   └── package.json
-├── contracts/
-│   ├── escrow/                         # Soroban smart contract (Rust/WASM)
-│   │   ├── src/
-│   │   │   └── lib.rs                  # Escrow contract implementation
-│   │   ├── Cargo.toml
-│   │   └── README.md                   # Contract ABI & documentation
+├── contracts/                           # Soroban smart contracts (Rust/WASM), one crate per dir
+│   ├── escrow/                         # Three-party (sender/recipient/agent) remittance escrow
+│   ├── agent-escrow/                   # Trustless agent-mediated escrow variant
+│   ├── dispute-resolution/             # On-chain three-party dispute resolution
+│   ├── fee-distributor/                # Platform fee accumulation & withdrawal
+│   ├── kyc-attestation/                # On-chain KYC status (SHA-256 hash, no raw PII)
+│   ├── loyalty-token/                  # SEP-41 fungible loyalty token + tiered redemption
+│   ├── multisig-approval/              # Multisig proposal approval & key rotation
+│   ├── recurring-payments/             # User-authorized recurring transfers (non-custodial)
+│   ├── savings-vault/                  # On-chain savings deposit/withdrawal vault
 │   ├── README.md                       # Contracts directory guide
 │   ├── deploy.sh                       # Deployment script for all contracts
 │   └── .gitignore
