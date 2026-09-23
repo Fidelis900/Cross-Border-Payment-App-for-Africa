@@ -101,11 +101,6 @@ export default function SendMoney() {
   const [showPushPrompt, setShowPushPrompt] = useState(false);
   const { shouldShowPrompt } = usePushNotifications();
 
-  // Stream real-time payment status updates for the active wallet.
-  // Surfacing connectionState lets step 4 show a reconnecting indicator so the
-  // user isn't looking at a silently-stale status view.
-  const { connectionState } = usePaymentStream(selectedWallet?.public_key ?? null, () => {});
-
   // Pre-fill form from payment request when only requestId is in the URL
   useEffect(() => {
     if (!requestId || form.recipient_address || form.amount) return;
@@ -190,6 +185,11 @@ export default function SendMoney() {
   const [showWalletDropdown, setShowWalletDropdown] = useState(false);
 
   const selectedWallet = wallets.find((w) => w.id === selectedWalletId) || wallets[0] || null;
+
+  // Stream real-time payment status updates for the active wallet.
+  // Surfacing connectionState lets step 4 show a reconnecting indicator so the
+  // user isn't looking at a silently-stale status view.
+  const { connectionState } = usePaymentStream(selectedWallet?.public_key ?? null, () => {});
 
   // Available XLM balance for the selected wallet (after minimum reserve)
   const selectedWalletXlmEntry = selectedWallet?.balances?.find((b) => b.asset === 'XLM');

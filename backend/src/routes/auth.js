@@ -33,6 +33,7 @@ const {
   webauthnRegister,
   webauthnLoginOptions,
   webauthnVerify,
+  completeOnboarding,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 const geoRestriction = require('../middleware/geoRestriction');

@@ -31,10 +31,9 @@ router.get("/status", getKYCStatus);
 
 router.post(
   "/submit",
-  upload,
-  scanUpload,
   kycSubmissionLimiter,
   kycUpload,
+  scanUpload,
   [
     body("id_type").notEmpty().withMessage("ID type is required"),
     body("id_number").notEmpty().withMessage("ID number is required"),
