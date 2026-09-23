@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const { MemoryStore } = require('express-rate-limit');
 const Redis = require('ioredis');
 const logger = require('../utils/logger');
 const audit = require('../services/audit');
@@ -78,6 +79,14 @@ class RedisStore {
   constructor(windowMs, prefix) {
     this.windowSec = Math.ceil(windowMs / 1000);
     this.prefix = prefix;
+    // Per-process fallback used while Redis is unconfigured or erroring.
+    // express-rate-limit has no implicit fallback: a store that returns null
+    // makes every request fail with a 500.
+    this.memory = new MemoryStore();
+  }
+
+  init(options) {
+    this.memory.init(options);
   }
 
   async increment(key) {
@@ -86,7 +95,7 @@ class RedisStore {
     if (!redis) {
       // No Redis configured — fall back to in-memory (handled by express-rate-limit default)
       markDegraded(this.prefix, 'no_redis_configured');
-      return null;
+      return this.memory.increment(key);
     }
     try {
       const multi = redis.multi();
@@ -101,13 +110,13 @@ class RedisStore {
       return { totalHits, resetTime };
     } catch (err) {
       markDegraded(this.prefix, 'redis_error');
-      return null; // Redis error — fail open
+      return this.memory.increment(key); // Redis error — degrade to per-process limiting
     }
   }
 
   async decrement(key) {
     const redis = getRedis();
-    if (!redis) return;
+    if (!redis) return this.memory.decrement(key);
     try {
       await redis.decr(`rl:${this.prefix}:${key}`);
     } catch {}
@@ -115,7 +124,7 @@ class RedisStore {
 
   async resetKey(key) {
     const redis = getRedis();
-    if (!redis) return;
+    if (!redis) return this.memory.resetKey(key);
     try {
       await redis.del(`rl:${this.prefix}:${key}`);
     } catch {}
@@ -178,11 +187,7 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   handler(req, res, next, options) {
     onLimitReached(req, res, options);
-    makeHeaders(req, res, options.requestWasSuccessful ? {} : {
-      limit: options.max,
-      remaining: 0,
-      resetTime: new Date(Date.now() + options.windowMs),
-    });
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
     res.status(429).json({ error: 'Too many auth attempts. Please try again later.' });
   },
   message: { error: 'Too many auth attempts. Please try again later.' },
