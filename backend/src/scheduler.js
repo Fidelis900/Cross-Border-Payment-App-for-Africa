@@ -10,6 +10,7 @@ const { activateScheduledFeeConfigs } = require('./jobs/activateScheduledFeeConf
 const { remindScheduledFeeConfigs } = require('./jobs/remindScheduledFeeConfigs');
 const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 const { cleanupOldNotifications } = require('./jobs/cleanupOldNotifications');
+const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
 
 // Configurable cron expressions — fall back to sensible defaults
 const PAYMENTS_CRON       = process.env.CRON_SCHEDULED_PAYMENTS   || '* * * * *';   // every minute
@@ -17,8 +18,6 @@ const INDEXER_CRON        = process.env.CRON_CONTRACT_INDEXER      || '*/2 * * *
 const EXPIRY_CRON         = process.env.CRON_CLAIMABLE_EXPIRY      || '*/15 * * * *'; // every 15 minutes
 const OFFER_SYNC_CRON     = process.env.CRON_OFFER_SYNC            || '*/2 * * * *'; // every 2 minutes
 const PUSH_RETRY_CRON     = process.env.CRON_PUSH_RETRY            || '* * * * *';   // every 60 seconds
-const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
-const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 
 const KYC_EXPIRY_CRON      = process.env.CRON_KYC_EXPIRY            || '0 0 * * *';   // daily at midnight
 const ANALYTICS_REFRESH_CRON = process.env.CRON_ANALYTICS_REFRESH   || '0 * * * *';   // hourly
@@ -26,7 +25,6 @@ const LOYALTY_MINT_CRON    = process.env.CRON_LOYALTY_MINT          || '* * * * 
 const FEE_CONFIG_ACTIVATE_CRON = process.env.CRON_FEE_CONFIG_ACTIVATE || '* * * * *'; // every minute
 const NOTIFICATION_CLEANUP_CRON = process.env.CRON_NOTIFICATION_CLEANUP || '0 2 * * *'; // daily at 2 AM
 const FEE_CONFIG_REMINDER_CRON = process.env.CRON_FEE_CONFIG_REMINDER || '0 * * * *'; // hourly
-const LOYALTY_MINT_CRON = process.env.CRON_LOYALTY_MINT || '* * * * *'; // every minute
 
 // Wrap a job so overlapping runs are skipped and errors are always caught
 function safeJob(name, fn) {
@@ -83,9 +81,6 @@ function startScheduler() {
 
   cron.schedule(NOTIFICATION_CLEANUP_CRON, safeJob('cleanupOldNotifications', cleanupOldNotifications));
   logger.info('Notification cleanup job registered', { cron: NOTIFICATION_CLEANUP_CRON });
-
-  cron.schedule(LOYALTY_MINT_CRON, safeJob('loyaltyMintQueue', processLoyaltyMintQueue));
-  logger.info('Loyalty mint queue job registered', { cron: LOYALTY_MINT_CRON });
 }
 
 module.exports = { startScheduler };
