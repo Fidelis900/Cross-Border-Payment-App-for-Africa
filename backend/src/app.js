@@ -57,7 +57,6 @@ const app = express();
 const path = require('path');
 app.use('/uploads/avatars', express.static(path.join(__dirname, '../uploads/avatars')));
 
-app.use(Sentry.Handlers.requestHandler());
 app.use(requestId);
 app.use((req, res, next) => {
   req.logger = logger.child({ requestId: req.requestId });
@@ -284,7 +283,9 @@ app.get('/metrics', async (req, res) => {
   res.end(await registry.metrics());
 });
 
-app.use(Sentry.Handlers.errorHandler());
+// @sentry/node v8: request isolation comes from Sentry.init() in index.js;
+// this registers the error handler (replaces the v7 Sentry.Handlers API).
+Sentry.setupExpressErrorHandler(app);
 
 app.use((err, req, res, next) => {
   req.logger.error(err.message, { stack: err.stack, status: err.status });
