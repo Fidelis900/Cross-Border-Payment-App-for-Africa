@@ -3,6 +3,7 @@ const db = require('../db');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
+const { retryDelivery } = require('../services/webhook');
 
 const VALID_EVENTS = ['payment.sent', 'payment.received', 'payment.failed'];
 
@@ -161,7 +162,6 @@ async function retry(req, res, next) {
   }
 }
 
-module.exports = { create, update, list, listDeliveries, retry, rotateSecret };
 async function update(req, res, next) {
   try {
     const { id } = req.params;
@@ -205,4 +205,4 @@ async function update(req, res, next) {
   }
 }
 
-module.exports = { create, update, list, listDeliveries, retry };
+module.exports = { create, update, list, listDeliveries, retry, rotateSecret };

@@ -2,62 +2,22 @@
 
 const https = require('https');
 const db = require('../db');
-const { sign } = require('../utils/webhookSignature');
+const { sign, buildSignatureHeader } = require('../utils/webhookSignature');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { decryptSecret } = require('../utils/symmetricEncryption');
-const { sign, buildSignatureHeader } = require('../utils/webhookSignature');
 const logger = require('../utils/logger');
-const { validatePublicUrl: isPublicHttpsUrl } = require('../utils/ssrf');
 
 const MAX_ATTEMPTS = 3;
 
-function sign(secret, payload) {
-  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
-}
-
-function httpsPost(url, body, signature) {
 /**
  * Perform a single HTTPS POST with the AfriPay webhook signature header.
  *
  * @param {string} url       - Fully-qualified HTTPS URL
  * @param {string} body      - JSON-serialised payload string
- * @param {string} signature - Hex HMAC-SHA256 digest of body
+ * @param {string} signature - X-AfriPay-Signature-256 header value (see buildSignatureHeader)
  * @param {import('https').Agent|undefined} agent - DNS-pinned agent (SSRF protection)
  * @returns {Promise<number>} Resolves with the HTTP status code on 2xx
  */
-async function isPublicHttpsUrl(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-
-  if (parsed.protocol !== 'https:') {
-    return false;
-  }
-
-  const hostname = parsed.hostname;
-
-  // Reject bare private IPs
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && isPrivateIp(hostname)) {
-    return false;
-  }
-
-  // Resolve and check returned IP
-  try {
-    const { address } = await require('dns').promises.lookup(hostname);
-    if (isPrivateIp(address)) {
-      return false;
-    }
-  } catch {
-    return false;
-  }
-
-  return true;
-}
-
-function httpsPost(url, body, signature) {
 function httpsPost(url, body, signature, agent) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -69,7 +29,7 @@ function httpsPost(url, body, signature, agent) {
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body),
-        'X-AfriPay-Signature-256': `sha256=${signature}`,
+        'X-AfriPay-Signature-256': signature,
       },
       // Use the DNS-pinned agent from SSRF validation to prevent DNS rebinding
       ...(agent && { agent }),
@@ -111,6 +71,24 @@ async function updateDeliveryLog(deliveryId, status, statusCode, responseTimeMs,
   );
 }
 
+// Delivery logging is best-effort: a failure to write the log must never
+// block or fail the delivery itself.
+async function safeCreateDeliveryLog(...args) {
+  try {
+    return await createDeliveryLog(...args);
+  } catch (err) {
+    logger.warn('Failed to create webhook delivery log', { error: err.message });
+    return null;
+  }
+}
+
+async function safeUpdateDeliveryLog(deliveryId, ...args) {
+  if (!deliveryId) return;
+  await updateDeliveryLog(deliveryId, ...args).catch((err) =>
+    logger.warn('Failed to update webhook delivery log', { deliveryId, error: err.message })
+  );
+}
+
 // Build the list of plaintext secrets a delivery should be signed with: the
 // current secret, plus the previous one if it's still inside its rotation
 // overlap window — lets a merchant who hasn't rolled their verification key
@@ -123,12 +101,6 @@ function activeSecrets(row) {
   return secrets;
 }
 
-async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
-  // Re-validate URL before each delivery to catch DNS rebinding / stale records
-  if (!await isPublicHttpsUrl(url)) {
-    logger.error('Webhook delivery blocked: URL failed SSRF validation', { url });
-    await createDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload)
-      .then((id) => updateDeliveryLog(id, 'failed', null, null, 'SSRF validation failed'));
 /**
  * Deliver a webhook payload to a single subscriber URL with exponential-backoff retry.
  *
@@ -138,32 +110,36 @@ async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
  *
  * @param {string|null} webhookId - Subscriber row ID (for logging; may be null)
  * @param {string}      url       - Target HTTPS endpoint
- * @param {string}      secret    - Plain-text HMAC secret (already decrypted by caller)
+ * @param {string|string[]} secrets - Plain-text HMAC secret(s) (already decrypted by caller);
+ *                                   pass activeSecrets(row) to include a rotating previous secret
  * @param {object}      payload   - Object with at minimum { event: string }
  * @param {number}      [attempt=0] - Zero-based attempt counter (used internally for retries)
  */
-async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
+async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
   const ssrfCheck = await validateOutboundUrl(url);
   if (!ssrfCheck.valid) {
     logger.error('Webhook delivery blocked: URL failed SSRF validation', {
       url,
       reason: ssrfCheck.error,
     });
+    const blockedId = await safeCreateDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload);
+    await safeUpdateDeliveryLog(blockedId, 'failed', null, null, 'SSRF validation failed');
     return;
   }
 
   const body = JSON.stringify(payload);
-  const signature = buildSignatureHeader(secrets, body);
-  const deliveryId = await createDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload);
+  const signature = buildSignatureHeader(Array.isArray(secrets) ? secrets : [secrets], body);
+  const deliveryId = await safeCreateDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload);
   const start = Date.now();
-  const signature = sign(secret, body);
 
   try {
-    await httpsPost(url, body, signature, ssrfCheck.agent);
+    const statusCode = await httpsPost(url, body, signature, ssrfCheck.agent);
+    await safeUpdateDeliveryLog(deliveryId, 'delivered', statusCode, Date.now() - start, null);
   } catch (err) {
     const errMessage = err.message.includes('Error:')
       ? err.message.replace(/^Error:\s*/, '')
       : err.message;
+    await safeUpdateDeliveryLog(deliveryId, 'failed', null, Date.now() - start, errMessage);
 
     if (attempt < MAX_ATTEMPTS - 1) {
       // Transient failure — log a warning and schedule a retry
@@ -174,7 +150,7 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
         error: errMessage,
       });
       const delay = Math.pow(2, attempt) * 1000;
-      setTimeout(() => deliverWithRetry(webhookId, url, secret, payload, attempt + 1), delay);
+      setTimeout(() => deliverWithRetry(webhookId, url, secrets, payload, attempt + 1), delay);
     } else {
       // Final attempt failed — log an error and give up
       logger.error('Webhook delivery permanently failed', {
@@ -183,12 +159,14 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
         attempts: MAX_ATTEMPTS,
         error: errMessage,
       });
-      await new Promise((r) => setTimeout(r, delay));
-      return deliverWithRetry(webhookId, url, secrets, payload, attempt + 1);
     }
   }
 }
 
+/**
+ * Re-send a previously failed delivery (POST /api/webhooks/deliveries/:id/retry).
+ * Signs with the webhook's current secret set, including a rotating previous secret.
+ */
 async function retryDelivery(deliveryId) {
   const { rows } = await db.query(
     `SELECT wd.webhook_id, wd.target_url, wd.payload, wd.event_type,
@@ -220,9 +198,6 @@ async function deliver(event, data) {
      FROM webhooks WHERE active = true AND $1 = ANY(events)`,
     [event]
   );
-  const timestamp = Math.floor(Date.now() / 1000);
-  const payload = { timestamp, event, data };
-  await Promise.all(rows.map((wh) => deliverWithRetry(wh.id, wh.url, activeSecrets(wh), payload)));
 
   if (!rows.length) return;
 
@@ -233,11 +208,8 @@ async function deliver(event, data) {
   };
 
   await Promise.all(
-    rows.map((wh) => {
-      const plainSecret = decryptSecret(wh.secret);
-      return deliverWithRetry(wh.id || null, wh.url, plainSecret, payload);
-    })
+    rows.map((wh) => deliverWithRetry(wh.id || null, wh.url, activeSecrets(wh), payload))
   );
 }
 
-module.exports = { deliver, deliverWithRetry, sign, MAX_ATTEMPTS };
+module.exports = { deliver, deliverWithRetry, retryDelivery, sign, MAX_ATTEMPTS };
