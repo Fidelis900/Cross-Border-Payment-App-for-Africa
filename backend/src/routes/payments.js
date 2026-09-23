@@ -101,9 +101,6 @@ router.get("/fee-rate", getFeeRate);
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
- * POST /api/payments/send
- * @protected @idempotent
- * Idempotency-Key header prevents duplicate payments on client retry.
  */
 router.post("/send", paymentSendValidators, validate, idempotency, send);
 

@@ -1431,4 +1431,5 @@ module.exports = {
   webauthnRegister,
   webauthnLoginOptions,
   webauthnVerify,
+  completeOnboarding,
 };
