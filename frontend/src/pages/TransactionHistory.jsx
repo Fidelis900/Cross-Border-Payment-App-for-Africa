@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff, Loader2, Copy, CheckCheck } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff, Loader2, Copy, CheckCheck } from 'lucide-react';
 import { FixedSizeList } from 'react-window';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
-import { ArrowLeft, ChevronDown, Send, Download, ExternalLink, Filter, Search, Flag, X, WifiOff, Loader2 } from 'lucide-react';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
 import { TransactionCardSkeleton } from '../components/Skeleton';
