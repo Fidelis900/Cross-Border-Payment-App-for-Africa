@@ -51,6 +51,9 @@ startPriceRefreshJob();
 
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`, { port: PORT });
+  // Background workers (Horizon streams, cron scheduler, monitors) never run
+  // under Jest: they outlive the test environment and crash the runner.
+  if (process.env.NODE_ENV === 'test') return;
   initStreams();
   startScheduler();
   startFallbackDurationMonitor(); // BE-036: alert if Horizon fallback stays active too long
