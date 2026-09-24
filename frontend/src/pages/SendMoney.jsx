@@ -14,6 +14,7 @@ import {
   BookUser,
 } from 'lucide-react';
 import api from '../utils/api';
+import { validateStellarAddress } from '../utils/validation';
 import { useExchangeRates } from '../hooks/useExchangeRates';
 import toast from 'react-hot-toast';
 import { useTranslation } from 'react-i18next';
@@ -143,9 +144,8 @@ export default function SendMoney() {
 
   const isCrossAsset = usePathPayment && form.destination_asset && form.destination_asset !== form.asset;
 
-  /** Returns true for a valid Ed25519 public key or a federation address */
-  const isValidStellarAddress = (addr) =>
-    (addr.startsWith('G') && addr.length === 56) || addr.includes('*');
+  /** True for a checksum-valid Ed25519 key or a well-formed federation address. */
+  const isValidStellarAddress = (addr) => validateStellarAddress(addr) === null;
 
   // Initial/clean state used for reset and dirty-check
   const cleanForm = {
@@ -765,7 +765,7 @@ export default function SendMoney() {
       const recipientAddr = form.recipient_address;
       const isKnown = contacts.some((c) => c.wallet_address === recipientAddr);
       resetForm();
-      if (!isKnown && recipientAddr.startsWith('G') && recipientAddr.length === 56) {
+      if (!isKnown && isValidStellarAddress(recipientAddr)) {
         setShowSaveContactPrompt(recipientAddr);
         setSaveContactName('');
       } else {
@@ -994,7 +994,7 @@ export default function SendMoney() {
           />
           {addressError && (
             <p id="address-error" className="mt-1 text-xs text-red-400">
-              Invalid address. Enter a Stellar public key (G…, 56 chars) or federation address
+              Invalid address. Enter a valid Stellar public key or federation address
               (name*domain).
             </p>
           )}
