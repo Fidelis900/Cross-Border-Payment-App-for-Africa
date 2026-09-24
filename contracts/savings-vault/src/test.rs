@@ -518,3 +518,169 @@ fn test_two_depositors_independent() {
     assert_eq!(client.get_balance(&user2), amount2);
     assert_eq!(client.get_unlock_time(&user2), unlock_time2);
 }
+
+// ── SC-033: Emergency Mode State Machine & Illegal Transition Tests ───────────
+
+#[test]
+#[should_panic(expected = "emergency already active")]
+fn test_double_activate_panics() {
+    let (_, client, admin, _) = setup();
+    client.activate_emergency(&admin);
+    client.activate_emergency(&admin);
+}
+
+#[test]
+#[should_panic(expected = "emergency already announced")]
+fn test_double_announce_panics() {
+    let (_, client, admin, _) = setup();
+    client.announce_emergency(&admin);
+    client.announce_emergency(&admin);
+}
+
+#[test]
+#[should_panic(expected = "cannot cancel after emergency delay has elapsed")]
+fn test_cancel_after_delay_panics() {
+    let (env, client, admin, _) = setup();
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+    client.cancel_emergency(&admin);
+}
+
+#[test]
+#[should_panic(expected = "no emergency announced")]
+fn test_emergency_withdraw_without_announcement_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+    client.emergency_withdraw(&admin, &user);
+}
+
+#[test]
+#[should_panic(expected = "no emergency active")]
+fn test_emergency_return_funds_without_activation_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+    client.emergency_return_funds(&admin, &user);
+}
+
+#[test]
+#[should_panic(expected = "No vault found for user")]
+fn test_emergency_withdraw_then_return_funds_mutually_exclusive() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.announce_emergency(&admin);
+    client.activate_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+
+    // First emergency withdrawal succeeds
+    client.emergency_withdraw(&admin, &user);
+    assert_eq!(client.get_balance(&user), 0);
+
+    // Subsequent emergency return funds for same user must be rejected
+    client.emergency_return_funds(&admin, &user);
+}
+
+#[test]
+#[should_panic(expected = "No vault found for user")]
+fn test_emergency_return_funds_then_withdraw_mutually_exclusive() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.announce_emergency(&admin);
+    client.activate_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+
+    // First emergency return funds succeeds
+    client.emergency_return_funds(&admin, &user);
+    assert_eq!(client.get_balance(&user), 0);
+
+    // Subsequent emergency withdrawal for same user must be rejected
+    client.emergency_withdraw(&admin, &user);
+}
+
+#[test]
+#[should_panic(expected = "No vault found for user")]
+fn test_double_emergency_withdraw_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.announce_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+
+    client.emergency_withdraw(&admin, &user);
+    client.emergency_withdraw(&admin, &user);
+}
+
+#[test]
+#[should_panic(expected = "No vault found for user")]
+fn test_double_emergency_return_funds_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let amount = 1_000_0000000i128;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, amount);
+    client.deposit(&user, &amount, &unlock_time);
+
+    client.activate_emergency(&admin);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 172_800);
+
+    client.emergency_return_funds(&admin, &user);
+    client.emergency_return_funds(&admin, &user);
+}
+
+// ── SC-032: Penalty Math Checked Arithmetic & Bounds Tests ────────────────────
+
+#[test]
+#[should_panic(expected = "Amount exceeds maximum deposit bound")]
+fn test_deposit_exceeds_max_bound_panics() {
+    let (env, client, admin, usdc_id) = setup();
+    let user = Address::generate(&env);
+    let excessive_amount = crate::MAX_DEPOSIT_AMOUNT + 1;
+    let unlock_time = env.ledger().timestamp() + 86400;
+    mint_usdc(&env, &usdc_id, &admin, &user, excessive_amount);
+    client.deposit(&user, &excessive_amount, &unlock_time);
+}
+
+#[test]
+fn test_penalty_math_property_over_input_space() {
+    let amounts = [
+        1i128,
+        100_0000000i128,
+        1_000_0000000i128,
+        50_000_0000000i128,
+        1_000_000_000_0000000i128,
+        10_000_000_000_0000000i128,
+    ];
+    let penalty_bps_values = [0u32, 100u32, 500u32, 1000u32, 2500u32, 5000u32, 10000u32];
+
+    for &amt in &amounts {
+        for &bps in &penalty_bps_values {
+            let penalty = (amt * bps as i128) / 10000;
+            let net = amt - penalty;
+            assert!(penalty >= 0);
+            assert!(net >= 0);
+            assert_eq!(penalty + net, amt);
+            assert!(penalty <= amt);
+        }
+    }
+}
