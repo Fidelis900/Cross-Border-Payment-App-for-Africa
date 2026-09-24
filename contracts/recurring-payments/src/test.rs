@@ -644,3 +644,133 @@ fn test_per_sender_limit_enforcement() {
     // 501st must panic
     client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
 }
+
+// ── SC-031: Pagination Bounds & Overflow Guard Tests ─────────────────────────
+
+#[test]
+fn test_pagination_extreme_bounds_get_user_schedules() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
+
+    // Test extreme start values (no overflow panic, returns empty vec)
+    let res1 = client.get_user_schedules(&sender, &u32::MAX, &50);
+    assert_eq!(res1.len(), 0);
+
+    // Test extreme limit values (clamped to 50 max, does not panic)
+    let res2 = client.get_user_schedules(&sender, &0, &u32::MAX);
+    assert_eq!(res2.len(), 1);
+
+    // Test start + limit overflow scenario
+    let res3 = client.get_user_schedules(&sender, &(u32::MAX - 10), &u32::MAX);
+    assert_eq!(res3.len(), 0);
+}
+
+#[test]
+fn test_pagination_extreme_bounds_get_active_schedules() {
+    let (env, contract_id, token_id, sender, recipient, _, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    client.create_recurring_payment(&sender, &recipient, &token_id, &100_0000000, &86400, &0, &3600, &3);
+
+    // Test extreme start values (no overflow panic, returns empty vec)
+    let res1 = client.get_active_schedules(&u64::MAX, &50);
+    assert_eq!(res1.len(), 0);
+
+    // Test extreme limit values (clamped to 50 max, does not panic)
+    let res2 = client.get_active_schedules(&0, &u64::MAX);
+    assert_eq!(res2.len(), 1);
+
+    // Test start + limit overflow scenario
+    let res3 = client.get_active_schedules(&(u64::MAX - 10), &u64::MAX);
+    assert_eq!(res3.len(), 0);
+}
+
+// ── SC-030: Circuit Breaker / Cadence Enforcement Against Compromised Executor ──
+
+#[test]
+#[should_panic(expected = "payment not yet due")]
+fn test_execute_payment_immediate_succession_rejected() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    let interval = 86400u64;
+    let id = client.create_recurring_payment(
+        &sender,
+        &recipient,
+        &token_id,
+        &100_0000000,
+        &interval,
+        &0,
+        &3600,
+        &3,
+    );
+
+    // Advance to due time
+    advance_time(&env, interval);
+
+    // First execution succeeds
+    client.execute_payment(&executor, &id);
+
+    // Immediate second execution must panic with "payment not yet due"
+    client.execute_payment(&executor, &id);
+}
+
+#[test]
+fn test_compromised_executor_rapid_calls_cannot_drain_funds() {
+    let (env, contract_id, token_id, sender, recipient, executor, _) = setup();
+    let client = RecurringPaymentsContractClient::new(&env, &contract_id);
+
+    let initial_balance = 10_000_0000000i128;
+    let payment_amount = 100_0000000i128;
+    let interval = 86400u64;
+
+    let id = client.create_recurring_payment(
+        &sender,
+        &recipient,
+        &token_id,
+        &payment_amount,
+        &interval,
+        &0,
+        &3600,
+        &3,
+    );
+
+    // Advance to first payment due date
+    advance_time(&env, interval);
+
+    // Executor executes the valid payment
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount);
+
+    // Simulated rogue/compromised executor attempts rapid repeated calls in a loop
+    for _ in 0..20 {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.execute_payment(&executor, &id);
+        }));
+        assert!(result.is_err(), "rapid repeated call must be rejected");
+    }
+
+    // Total funds moved must still strictly equal exactly 1 payment amount
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount);
+
+    // Advance halfway through interval (12 hours) — rogue calls must still fail
+    advance_time(&env, 43200);
+    for _ in 0..10 {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.execute_payment(&executor, &id);
+        }));
+        assert!(result.is_err(), "call before interval elapsed must be rejected");
+    }
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount);
+
+    // Advance remaining 12 hours (full interval elapsed) — next execution now succeeds
+    advance_time(&env, 43200);
+    client.execute_payment(&executor, &id);
+    assert_eq!(token_balance(&env, &token_id, &recipient), payment_amount * 2);
+    assert_eq!(token_balance(&env, &token_id, &sender), initial_balance - payment_amount * 2);
+}
+
