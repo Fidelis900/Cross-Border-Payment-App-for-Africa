@@ -518,3 +518,132 @@ fn test_two_depositors_independent() {
     assert_eq!(client.get_balance(&user2), amount2);
     assert_eq!(client.get_unlock_time(&user2), unlock_time2);
 }
+
+// SC-034: Lock bounds tests
+#[test]
+#[should_panic(expected = "min_secs must be less than max_secs")]
+fn test_update_lock_bounds_inverted_range_panics() {
+    let (env, client, admin, _) = setup();
+    client.update_lock_bounds(&admin, &1000, &500);
+}
+
+#[test]
+#[should_panic(expected = "min_secs must be less than max_secs")]
+fn test_update_lock_bounds_equal_range_panics() {
+    let (env, client, admin, _) = setup();
+    client.update_lock_bounds(&admin, &500, &500);
+}
+
+#[test]
+fn test_deposit_at_exact_min_and_max_bounds() {
+    let (env, client, admin, usdc_id) = setup();
+    let min_secs: u64 = 1000;
+    let max_secs: u64 = 5000;
+    client.update_lock_bounds(&admin, &min_secs, &max_secs);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let amount = 100_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &user1, amount);
+    mint_usdc(&env, &usdc_id, &admin, &user2, amount);
+
+    let now = env.ledger().timestamp();
+    // Exactly min_secs
+    client.deposit(&user1, &amount, &(now + min_secs));
+    assert_eq!(client.get_balance(&user1), amount);
+
+    // Exactly max_secs
+    client.deposit(&user2, &amount, &(now + max_secs));
+    assert_eq!(client.get_balance(&user2), amount);
+}
+
+// SC-035: Flash deposit timing test asserting time-weighted yield accrual
+#[test]
+fn test_flash_deposit_yield_capture_is_time_weighted() {
+    let (env, client, admin, usdc_id) = setup();
+    let min_secs = 100;
+    let max_secs = 10_000_000;
+    client.update_lock_bounds(&admin, &min_secs, &max_secs);
+
+    // 10% interest rate per year
+    client.set_interest_rate(&admin, &1000u32);
+
+    let user = Address::generate(&env);
+    let deposit_amount = 1_000_0000000i128; // 1,000 USDC
+    mint_usdc(&env, &usdc_id, &admin, &user, deposit_amount);
+
+    let now = env.ledger().timestamp();
+    // Deposit with unlock_time
+    client.deposit(&user, &deposit_amount, &(now + min_secs));
+
+    // Fast-forward only 1 second
+    env.ledger().with_mut(|li| li.timestamp += 1);
+
+    // Accrue interest after 1 second
+    client.accrue_interest(&user);
+
+    let vault = client.get_vault(&user);
+    // Yield for 1 second out of 31,536,000 seconds per year at 10%
+    // Full year interest would be 100 USDC (100_0000000). For 1 second, it should be tiny (< 1 USDC)
+    assert!(vault.accrued_interest < 1_0000000i128);
+}
+
+// SC-037: Invariant test asserting sum(vault balances) == get_total_locked
+#[test]
+fn test_invariant_sum_vault_balances_equals_total_locked() {
+    let (env, client, admin, usdc_id) = setup();
+    client.update_lock_bounds(&admin, &100, &10_000_000);
+    client.set_interest_rate(&admin, &500u32); // 5% APR
+
+    let users: [Address; 4] = [
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+        Address::generate(&env),
+    ];
+
+    let mut sum_balances: i128 = 0;
+    assert_eq!(client.get_total_locked(), sum_balances);
+
+    // Checkpoint 1: Initial deposits
+    for (i, user) in users.iter().enumerate() {
+        let amount = ((i as i128 + 1) * 250) * 10_000_000; // 250, 500, 750, 1000 USDC
+        mint_usdc(&env, &usdc_id, &admin, user, amount);
+        let unlock_time = env.ledger().timestamp() + 500 + (i as u64 * 100);
+        client.deposit(user, &amount, &unlock_time);
+    }
+
+    sum_balances = users.iter().map(|u| client.get_balance(u)).sum();
+    assert_eq!(client.get_total_locked(), sum_balances);
+
+    // Checkpoint 2: Accrue interest over time across vaults
+    env.ledger().with_mut(|li| li.timestamp += 1000);
+    for user in users.iter() {
+        client.accrue_interest(user);
+    }
+    sum_balances = users.iter().map(|u| client.get_balance(u)).sum();
+    assert_eq!(client.get_total_locked(), sum_balances);
+
+    // Checkpoint 3: Partial and full withdrawals
+    // User 0 partial withdrawal (unlock_time has passed)
+    client.withdraw(&users[0], &50_0000000i128);
+    sum_balances = users.iter().map(|u| client.get_balance(u)).sum();
+    assert_eq!(client.get_total_locked(), sum_balances);
+
+    // User 1 partial withdrawal
+    client.withdraw(&users[1], &100_0000000i128);
+    sum_balances = users.iter().map(|u| client.get_balance(u)).sum();
+    assert_eq!(client.get_total_locked(), sum_balances);
+
+    // Checkpoint 4: Additional deposit and interest accrual
+    let extra_deposit = 300_0000000i128;
+    mint_usdc(&env, &usdc_id, &admin, &users[2], extra_deposit);
+    let new_unlock = env.ledger().timestamp() + 1000;
+    client.deposit(&users[2], &extra_deposit, &new_unlock);
+
+    env.ledger().with_mut(|li| li.timestamp += 500);
+    client.accrue_interest(&users[2]);
+
+    sum_balances = users.iter().map(|u| client.get_balance(u)).sum();
+    assert_eq!(client.get_total_locked(), sum_balances);
+}
